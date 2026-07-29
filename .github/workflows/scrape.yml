@@ -1,0 +1,57 @@
+name: Scheduled Scrape
+
+on:
+  workflow_dispatch:            # manual "Run workflow" button
+  schedule:
+    # Tuesday (2) and Friday (5) at 02:00 UTC. cron is UTC — shift for your TZ.
+    - cron: "0 2 * * 2,5"
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+          sudo apt-get update && sudo apt-get install -y xvfb
+
+      - name: Run scraper (headful browser under Xvfb)
+        env:
+          HEADFUL: "1"
+          # SCRAPER_PROXY: ${{ secrets.SCRAPER_PROXY }}   # optional residential proxy
+        run: xvfb-run -a python scraper.py
+
+      - name: Commit scraped_data.json
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          if [ ! -s scraped_data.json ]; then
+            echo "No output produced; skipping commit."
+            exit 0
+          fi
+          git add scraped_data.json
+          if git diff --staged --quiet; then
+            echo "No changes."
+            exit 0
+          fi
+          git commit -m "Update scraped_data.json ($(date -u +'%Y-%m-%d %H:%M UTC'))"
+          branch="${GITHUB_REF_NAME:-main}"
+          for attempt in 1 2 3 4 5; do
+            if git push origin "HEAD:${branch}"; then break; fi
+            echo "Push rejected; syncing (attempt ${attempt})..."
+            git pull --rebase --autostash -X theirs origin "${branch}" || true
+            sleep $((attempt * 3))
+          done
